@@ -10,5 +10,5 @@ pub struct AppConfig {}
 pub fn run(args: AppConfig) -> cosmic::iced::Result {
     localize::init();
 
-    cosmic::app::run::<app::App>(cosmic::app::Settings::default(), args)
+    cosmic::applet::run::<app::App>(args)
 }

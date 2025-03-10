@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=TOTP Client
+Type=Application
+Exec=cosmic-totp-client --applet
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Iced;
+Icon=com.koranir.CosmicTotpClient-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto

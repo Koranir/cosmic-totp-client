@@ -16,6 +16,7 @@ pub struct App {
     new_entry: Option<NewEntry>,
     open_details: Option<uuid::Uuid>,
     potential_deletion: Option<uuid::Uuid>,
+    popup: Option<cosmic::iced::window::Id>,
 }
 
 struct ErrorMsg {
@@ -268,6 +269,7 @@ pub enum Message {
     MaybeDelete(uuid::Uuid),
     CancelDeleteEntry,
     DeleteEntry(uuid::Uuid),
+    Popup,
 }
 
 impl cosmic::Application for App {
@@ -316,12 +318,21 @@ impl cosmic::Application for App {
                 toasts: widget::Toasts::new(Message::RemoveToast),
                 open_details: None,
                 potential_deletion: None,
+                popup: None,
             },
             cosmic::app::Task::none(),
         )
     }
 
     fn view(&self) -> cosmic::Element<Self::Message> {
+        self.core
+            .applet
+            .icon_button("com.koranir.CosmicTotpClient-symbolic")
+            .on_press(Message::Popup)
+            .into()
+    }
+
+    fn view_window(&self, _id: cosmic::iced::window::Id) -> cosmic::Element<Self::Message> {
         let mut col = widget::column();
 
         match &self.passphrase {
@@ -459,7 +470,10 @@ impl cosmic::Application for App {
             );
         }
 
-        widget::toaster(&self.toasts, popover)
+        self.core
+            .applet
+            .popup_container(widget::container(widget::toaster(&self.toasts, popover)))
+            .into()
     }
 
     fn subscription(&self) -> cosmic::iced::Subscription<Self::Message> {
@@ -629,6 +643,29 @@ impl cosmic::Application for App {
 
                 if let Err(e) = self.try_save_secrets() {
                     self.eat_err(e);
+                }
+            }
+            Message::Popup => {
+                match self.popup.take() {
+                    Some(id) => return cosmic::iced::platform_specific::shell::wayland::commands::popup::destroy_popup(id),
+                    None => {
+                        let id = cosmic::iced::window::Id::unique();
+                        let mut settings = self.core.applet.get_popup_settings(
+                            self.core.main_window_id().unwrap(),
+                            id,
+                            None,
+                            None,
+                            None,
+                        );
+                        settings.positioner.size_limits = cosmic::iced::Limits::new(cosmic::iced::Size::new(200., 400.),
+                            cosmic::iced::Size::new(600., 800.),
+                        );
+                        settings.positioner.size = Some((300, 600));
+                        self.popup = Some(id);
+                        return cosmic::iced::platform_specific::shell::wayland::commands::popup::get_popup(
+                            settings,
+                        );
+                    },
                 }
             }
         }
