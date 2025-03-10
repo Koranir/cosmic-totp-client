@@ -169,7 +169,7 @@ impl CalcTotp {
             .as_secs();
         let v = totp.generate(unix_time);
 
-        *self = CalcTotp::Calc {
+        *self = Self::Calc {
             decoded: v,
             seconds_remaining: 30 - unix_time % 30,
         };
@@ -179,8 +179,8 @@ impl CalcTotp {
 
     pub fn decoded_pretty(&self) -> String {
         match self {
-            CalcTotp::Uninit => "...".into(),
-            CalcTotp::Calc { decoded, .. } => {
+            Self::Uninit => "...".into(),
+            Self::Calc { decoded, .. } => {
                 let mut decoded = decoded.clone();
                 decoded.insert(3, ' ');
                 decoded
@@ -190,15 +190,15 @@ impl CalcTotp {
 
     pub fn decoded_raw(&self) -> Option<String> {
         match self {
-            CalcTotp::Uninit => None,
-            CalcTotp::Calc { decoded, .. } => Some(decoded.clone()),
+            Self::Uninit => None,
+            Self::Calc { decoded, .. } => Some(decoded.clone()),
         }
     }
 
-    pub fn seconds_remaining(&self) -> u64 {
+    pub const fn seconds_remaining(&self) -> u64 {
         match self {
-            CalcTotp::Uninit => 0,
-            CalcTotp::Calc {
+            Self::Uninit => 0,
+            Self::Calc {
                 seconds_remaining, ..
             } => *seconds_remaining,
         }
@@ -219,14 +219,14 @@ pub enum TotpIcon {
 impl TotpIcon {
     pub fn view(&self, radius: f32) -> cosmic::Element<Message> {
         widget::container(match self {
-            TotpIcon::Image { path, handle } => cosmic::Element::from(
+            Self::Image { path, handle } => cosmic::Element::from(
                 widget::image(handle.get_or_init(|| widget::image::Handle::from_path(path)))
                     .width(Length::Fixed(radius * 2.0))
                     .height(Length::Fixed(radius * 2.0))
                     .border_radius([radius, radius, radius, radius])
                     .content_fit(cosmic::iced::ContentFit::Cover),
             ),
-            TotpIcon::Initials { initials } => widget::text::title1(initials)
+            Self::Initials { initials } => widget::text::title1(initials)
                 .width(radius * 2.0)
                 .height(radius * 2.0)
                 .center()
@@ -343,42 +343,39 @@ impl cosmic::Application for App {
                             .on_input(Message::PassphraseInput)
                             .on_submit(Message::PassphraseSubmitted),
                         ),
-                )
+                );
             }
             PassphraseState::Recieved(_secret_box) => {
                 if let SecretState::LoadedSecrets { entries } = &self.secret_state {
-                    match self.open_details {
-                        Some(id) => {
-                            if let Some(entry) = entries.iter().find(|e| e.id == id) {
-                                col = col.push(entry.view_page());
-                            }
+                    if let Some(id) = self.open_details {
+                        if let Some(entry) = entries.iter().find(|e| e.id == id) {
+                            col = col.push(entry.view_page());
                         }
-                        None => {
+                    } else {
+                        col = col.push(
+                            widget::container(
+                                widget::button::suggested("New Entry").on_press_maybe(
+                                    self.new_entry.is_none().then_some(Message::NewEntry),
+                                ),
+                            )
+                            .align_right(Length::Fill),
+                        );
+
+                        if entries.is_empty() {
                             col = col.push(
-                                widget::container(
-                                    widget::button::suggested("New Entry").on_press_maybe(
-                                        self.new_entry.is_none().then_some(Message::NewEntry),
-                                    ),
-                                )
-                                .align_right(Length::Fill),
+                                widget::text::title1("No Entries")
+                                    .center()
+                                    .width(Length::Fill)
+                                    .height(Length::Fill),
                             );
+                        } else {
+                            let mut list = widget::list_column();
 
-                            if entries.is_empty() {
-                                col = col.push(
-                                    widget::text::title1("No Entries")
-                                        .center()
-                                        .width(Length::Fill)
-                                        .height(Length::Fill),
-                                )
-                            } else {
-                                let mut list = widget::list_column();
-
-                                for entry in entries {
-                                    list = list.add(entry.view());
-                                }
-
-                                col = col.push(list);
+                            for entry in entries {
+                                list = list.add(entry.view());
                             }
+
+                            col = col.push(list);
                         }
                     }
                 }
@@ -593,7 +590,7 @@ impl cosmic::Application for App {
                         e.icon = Some(TotpIcon::Image {
                             path: PathBuf::from(handle.path()),
                             handle: std::sync::OnceLock::new(),
-                        })
+                        });
                     }
                 }
             }

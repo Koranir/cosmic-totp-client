@@ -16,7 +16,7 @@ struct Localize;
 pub static LL: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
     fluent_language_loader!().also(|l| {
         l.load_fallback_language(&Localize)
-            .expect("should have loaded the fallback language")
+            .expect("should have loaded the fallback language");
     })
 });
 
