@@ -248,12 +248,10 @@ impl TotpIcon {
 }
 #[derive(Debug, Clone)]
 pub enum Message {
-    // LoadedSecretsFile(Result<Vec<u8>, String>),
     TogglePassphraseVisible,
     RemoveError(u32),
     PassphraseInput(String),
     PassphraseSubmitted,
-    // FailedToSave,
     NewEntry,
     SaveNewEntry,
     NewEntryName(String),
@@ -471,17 +469,6 @@ impl cosmic::Application for App {
 
     fn update(&mut self, message: Self::Message) -> cosmic::app::Task<Self::Message> {
         match message {
-            // Message::LoadedSecretsFile(vec) => match vec {
-            //     Ok(res) => {
-            //         self.secret_state = SecretState::RequestingPassphrase { secret_data: res };
-            //         if let Err(e) = self.try_decode_secrets() {
-            //             self.eat_err(e);
-            //         }
-            //     }
-            //     Err(e) => {
-            //         self.eat_err(e);
-            //     }
-            // },
             Message::TogglePassphraseVisible => {
                 if let PassphraseState::Inputting { hidden, .. } = &mut self.passphrase {
                     *hidden = !*hidden;
@@ -504,7 +491,6 @@ impl cosmic::Application for App {
                     }
                 }
             }
-            // Message::FailedToSave => error!("Failed to save secrets"),
             Message::NewEntry => self.new_entry = Some(NewEntry::default()),
             Message::CancelNewEntry => self.new_entry = None,
             Message::SaveNewEntry => {
@@ -721,8 +707,7 @@ impl App {
                 Ok(())
             }
             (SecretState::RequestingPassphrase { secret_data }, PassphraseState::Recieved(s)) => {
-                let secr = match age::decrypt(&age::scrypt::Identity::new(s.clone()), secret_data)
-                {
+                let secr = match age::decrypt(&age::scrypt::Identity::new(s.clone()), secret_data) {
                     Ok(s) => s,
                     Err(e) => {
                         return Err(format!(
