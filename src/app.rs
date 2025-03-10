@@ -110,7 +110,6 @@ impl TotpEntry {
         )
         .padding(cosmic::theme::active().cosmic().space_s())
         .width(Length::Fill)
-        .height(Length::Fill)
         .class(cosmic::style::Container::Card);
 
         col = col.push(row);
@@ -333,73 +332,14 @@ impl cosmic::Application for App {
     }
 
     fn view_window(&self, _id: cosmic::iced::window::Id) -> cosmic::Element<Self::Message> {
-        let mut col = widget::column();
-
-        match &self.passphrase {
-            PassphraseState::Inputting { input, hidden } => {
-                col = col.push(
-                    widget::column()
-                        .spacing(cosmic::theme::active().cosmic().space_xs())
-                        .padding(cosmic::theme::active().cosmic().space_m())
-                        .push(widget::text::heading("Enter Passphrase"))
-                        .push(
-                            widget::secure_input(
-                                "passphrase",
-                                input.clone(),
-                                Some(Message::TogglePassphraseVisible),
-                                *hidden,
-                            )
-                            .on_input(Message::PassphraseInput)
-                            .on_submit(Message::PassphraseSubmitted),
-                        ),
-                );
-            }
-            PassphraseState::Recieved(_secret_box) => {
-                if let SecretState::LoadedSecrets { entries } = &self.secret_state {
-                    if let Some(id) = self.open_details {
-                        if let Some(entry) = entries.iter().find(|e| e.id == id) {
-                            col = col.push(entry.view_page());
-                        }
-                    } else {
-                        col = col.push(
-                            widget::container(
-                                widget::button::suggested("New Entry").on_press_maybe(
-                                    self.new_entry.is_none().then_some(Message::NewEntry),
-                                ),
-                            )
-                            .align_right(Length::Fill),
-                        );
-
-                        if entries.is_empty() {
-                            col = col.push(
-                                widget::text::title1("No Entries")
-                                    .center()
-                                    .width(Length::Fill)
-                                    .height(Length::Fill),
-                            );
-                        } else {
-                            let mut list = widget::list_column();
-
-                            for entry in entries {
-                                list = list.add(entry.view());
-                            }
-
-                            col = col.push(list);
-                        }
-                    }
-                }
-            }
-        };
+        let mut col = widget::column().padding(10).spacing(5);
 
         for e in &self.errors {
             col = col.push(e.view().map(Message::RemoveError));
         }
 
-        let col = col.padding(10).spacing(5);
-
-        let mut popover = widget::popover(col).modal(true);
         if let Some(entry) = &self.new_entry {
-            let col = widget::column()
+            let entry_dialog = widget::column()
                 .spacing(cosmic::theme::active().cosmic().space_s())
                 .push(widget::text::title3("New Entry"))
                 .push(
@@ -460,20 +400,86 @@ impl cosmic::Application for App {
                     .align_right(Length::Fill),
                 );
 
-            popover = popover.popup(
+            col = col.push(
                 widget::container(
-                    widget::container(col)
+                    widget::container(entry_dialog)
                         .class(cosmic::style::Container::Dialog)
                         .padding(cosmic::theme::active().cosmic().radius_m()[0]),
                 )
                 .padding(cosmic::theme::active().cosmic().space_s()),
             );
+        } else {
+            match &self.passphrase {
+                PassphraseState::Inputting { input, hidden } => {
+                    col = col.push(
+                        widget::column()
+                            .spacing(cosmic::theme::active().cosmic().space_xs())
+                            .padding(cosmic::theme::active().cosmic().space_m())
+                            .push(widget::text::heading("Enter Passphrase"))
+                            .push(
+                                widget::secure_input(
+                                    "passphrase",
+                                    input.clone(),
+                                    Some(Message::TogglePassphraseVisible),
+                                    *hidden,
+                                )
+                                .on_input(Message::PassphraseInput)
+                                .on_submit(Message::PassphraseSubmitted),
+                            ),
+                    );
+                }
+                PassphraseState::Recieved(_secret_box) => {
+                    if let SecretState::LoadedSecrets { entries } = &self.secret_state {
+                        if let Some(id) = self.open_details {
+                            if let Some(entry) = entries.iter().find(|e| e.id == id) {
+                                col = col.push(entry.view_page());
+                            }
+                        } else {
+                            col = col.push(
+                                widget::container(
+                                    widget::button::suggested("New Entry").on_press_maybe(
+                                        self.new_entry.is_none().then_some(Message::NewEntry),
+                                    ),
+                                )
+                                .align_right(Length::Fill),
+                            );
+
+                            if entries.is_empty() {
+                                col = col.push(
+                                    widget::text::title1("No Entries")
+                                        .center()
+                                        .width(Length::Fill)
+                                        .height(Length::Fill),
+                                );
+                            } else {
+                                let mut list = widget::list_column();
+
+                                for entry in entries {
+                                    list = list.add(entry.view());
+                                }
+
+                                col = col.push(list);
+                            }
+                        }
+                    }
+                }
+            };
         }
 
         self.core
             .applet
-            .popup_container(widget::container(widget::toaster(&self.toasts, popover)))
+            .popup_container(widget::container(widget::toaster(&self.toasts, col)))
             .into()
+    }
+
+    fn on_close_requested(&self, id: cosmic::iced::window::Id) -> Option<Self::Message> {
+        if let Some(popup_id) = self.popup {
+            if popup_id == id {
+                return Some(Message::Popup);
+            }
+        }
+
+        None
     }
 
     fn subscription(&self) -> cosmic::iced::Subscription<Self::Message> {
