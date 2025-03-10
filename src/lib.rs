@@ -2,7 +2,7 @@ mod localize;
 
 mod app;
 
-pub const APP_ID: &'static str = "com.koranir.CosmicTotpClient";
+pub const APP_ID: &str = "com.koranir.CosmicTotpClient";
 pub const CONFIG_VER: u64 = 1;
 
 pub struct AppConfig {}

@@ -293,7 +293,7 @@ impl cosmic::Application for App {
         core: cosmic::app::Core,
         _flags: Self::Flags,
     ) -> (Self, cosmic::app::Task<Self::Message>) {
-        let config = cosmic::cosmic_config::Config::new(&crate::APP_ID, crate::CONFIG_VER)
+        let config = cosmic::cosmic_config::Config::new(crate::APP_ID, crate::CONFIG_VER)
             .expect("there should be a config path available");
         let (secrets, errors) = match config.get("secrets") {
             Ok(sec) => (
@@ -464,7 +464,7 @@ impl cosmic::Application for App {
             );
         }
 
-        widget::toaster(&self.toasts, popover).into()
+        widget::toaster(&self.toasts, popover)
     }
 
     fn subscription(&self) -> cosmic::iced::Subscription<Self::Message> {
@@ -544,12 +544,12 @@ impl cosmic::Application for App {
                                     let initials = cch
                                         .get(0..2)
                                         .map(|s| s.iter().copied().collect())
-                                        .unwrap_or(cch.get(0).copied().unwrap_or('-').to_string());
+                                        .unwrap_or(cch.first().copied().unwrap_or('-').to_string());
                                     TotpIcon::Initials { initials }
                                 } else {
-                                    return TotpIcon::Initials {
+                                    TotpIcon::Initials {
                                         initials: fch[0..2].iter().collect(),
-                                    };
+                                    }
                                 }
                             }),
                             name: e.name,
@@ -627,7 +627,7 @@ impl cosmic::Application for App {
                                     .push(widget::Toast::new(format!(
                                         "Copied '{decoded}' to clipboard"
                                     )))
-                                    .map(|m| cosmic::app::Message::App(m)),
+                                    .map(cosmic::app::Message::App),
                             ]);
                         }
                     }
@@ -724,7 +724,7 @@ impl App {
                 Ok(())
             }
             (SecretState::RequestingPassphrase { secret_data }, PassphraseState::Recieved(s)) => {
-                let secr = match age::decrypt(&age::scrypt::Identity::new(s.clone()), &secret_data)
+                let secr = match age::decrypt(&age::scrypt::Identity::new(s.clone()), secret_data)
                 {
                     Ok(s) => s,
                     Err(e) => {
