@@ -1,64 +1,40 @@
-use std::path::PathBuf;
-
-use cosmic::{cosmic_config::ConfigGet, iced::Length, widget};
-use entry::{NewEntry, TotpIcon};
-use errors::ErrorMsg;
-use secrets::{PassphraseState, SecretState};
+use cosmic::{
+    app::Task,
+    cosmic_config::{ConfigGet, ConfigSet},
+    iced::Subscription,
+};
+use tracing::{error, info, warn};
 
 mod entry;
 mod errors;
 mod secrets;
 
-fn get_secrets_data(config: &cosmic::cosmic_config::Config) -> (SecretState, Vec<ErrorMsg>) {
-    match config.get("secrets") {
-        Ok(sec) => (
-            SecretState::RequestingPassphrase { secret_data: sec },
-            Vec::new(),
-        ),
-        Err(e) => (
-            SecretState::NoSecretsFile,
-            vec![ErrorMsg::new(format!("Failed to get secrets file: {e}"))],
-        ),
-    }
-}
-
 pub struct App {
     core: cosmic::app::Core,
-    passphrase: PassphraseState,
-    secret_state: SecretState,
-    errors: Vec<ErrorMsg>,
-    toasts: cosmic::widget::Toasts<Message>,
     config: cosmic::cosmic_config::Config,
-    new_entry: Option<NewEntry>,
-    open_details: Option<uuid::Uuid>,
-    potential_deletion: Option<uuid::Uuid>,
     popup: Option<cosmic::iced::window::Id>,
+
+    secret: secrets::State,
+    new_entry: Option<entry::Entry>,
+    entry_error: Option<String>,
+
+    user: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    TogglePassphraseVisible,
-    RemoveError(u32),
-    PassphraseInput(String),
-    PassphraseSubmitted,
-    NewEntry,
-    SaveNewEntry,
-    NewEntryName(String),
-    NewEntrySecret(String),
-    NewEntryIcon(String),
-    IconFileFind,
-    IconFileFound(Option<rfd::FileHandle>),
-    RecalcNeeded,
-    OpenDetails(uuid::Uuid),
-    CopyCode(uuid::Uuid),
-    RemoveToast(widget::ToastId),
-    CancelNewEntry,
-    CloseDetails,
-    MaybeDelete(uuid::Uuid),
-    CancelDeleteEntry,
-    DeleteEntry(uuid::Uuid),
-    Popup,
+    TogglePopup,
+    RetrievedKey(Result<secrets::State, String>),
+    UsernameInput(String),
+    UsernameSubmit(String),
     Logout,
+    Save,
+    SetKey(Result<(), String>),
+    NewEntry,
+    Entry(entry::EntryR, entry::EntryMessage),
+    EntryClearError,
+    NewEntryCancel,
+    NewEntryAccept,
 }
 
 impl cosmic::Application for App {
@@ -84,22 +60,16 @@ impl cosmic::Application for App {
     ) -> (Self, cosmic::app::Task<Self::Message>) {
         let config = cosmic::cosmic_config::Config::new(crate::APP_ID, crate::CONFIG_VER)
             .expect("there should be a config path available");
-        let (secrets, errors) = get_secrets_data(&config);
+        let user = config.get::<Option<String>>("last-user").ok().flatten();
         (
             Self {
                 core,
-                secret_state: secrets,
-                passphrase: PassphraseState::Inputting {
-                    input: String::new(),
-                    hidden: true,
-                },
-                errors,
                 config,
-                new_entry: None,
-                toasts: widget::Toasts::new(Message::RemoveToast),
-                open_details: None,
-                potential_deletion: None,
                 popup: None,
+                secret: secrets::State::PendingUser,
+                user,
+                new_entry: None,
+                entry_error: None,
             },
             cosmic::app::Task::none(),
         )
@@ -109,266 +79,168 @@ impl cosmic::Application for App {
         self.core
             .applet
             .icon_button("com.koranir.CosmicTotpClient-symbolic")
-            .on_press(Message::Popup)
+            .on_press(Message::TogglePopup)
             .into()
     }
 
     fn view_window(&self, _id: cosmic::iced::window::Id) -> cosmic::Element<Self::Message> {
-        let mut col = widget::column().padding(10).spacing(5);
+        use cosmic::widget::{button, column, horizontal_space, icon, row, text_input, warning};
 
-        for e in &self.errors {
-            col = col.push(e.view().map(Message::RemoveError));
-        }
-
-        if let Some(entry) = &self.new_entry {
-            let entry_dialog = entry.view_dialog();
-
-            col = col.push(
-                widget::container(
-                    widget::container(entry_dialog)
-                        .class(cosmic::style::Container::Dialog)
-                        .padding(cosmic::theme::active().cosmic().radius_m()[0]),
-                )
-                .padding(cosmic::theme::active().cosmic().space_s()),
+        let mut content = column().padding(10).spacing(5);
+        if matches!(&self.secret, secrets::State::PendingUser) {
+            content = content.push(
+                text_input("username", self.user.as_deref().unwrap_or(""))
+                    .password()
+                    .on_input(Message::UsernameInput)
+                    .on_submit(Message::UsernameSubmit),
             );
+        } else if let Some(entry) = &self.new_entry {
+            content = content
+                .push(
+                    entry
+                        .view_settings(true)
+                        .map(|m| Message::Entry(entry::EntryR::NewEntry, m)),
+                )
+                .push(
+                    row()
+                        .push(button::destructive("Cancel").on_press(Message::NewEntryCancel))
+                        .push(horizontal_space())
+                        .push(button::suggested("Create").on_press(Message::NewEntryAccept)),
+                )
+                .push_maybe(
+                    self.entry_error
+                        .as_deref()
+                        .map(|s| warning(s).on_close(Message::EntryClearError)),
+                );
         } else {
-            match &self.passphrase {
-                PassphraseState::Inputting { input, hidden } => {
-                    col = col.push(
-                        widget::column()
-                            .spacing(cosmic::theme::active().cosmic().space_xs())
-                            .padding(cosmic::theme::active().cosmic().space_m())
-                            .push(widget::text::heading("Enter Passphrase"))
-                            .push(
-                                widget::secure_input(
-                                    "passphrase",
-                                    input.clone(),
-                                    Some(Message::TogglePassphraseVisible),
-                                    *hidden,
-                                )
-                                .on_input(Message::PassphraseInput)
-                                .on_submit(Message::PassphraseSubmitted),
-                            ),
-                    );
-                }
-                PassphraseState::Recieved(_secret_box) => {
-                    if let SecretState::LoadedSecrets { entries } = &self.secret_state {
-                        if let Some(id) = self.open_details {
-                            if let Some(entry) = entries.iter().find(|e| e.id == id) {
-                                col = col.push(entry.view_page());
-                            }
-                        } else {
-                            col = col.push(
-                                widget::row()
-                                    .push(
-                                        widget::button::destructive("Logout")
-                                            .on_press(Message::Logout),
-                                    )
-                                    .push(widget::horizontal_space())
-                                    .push(widget::button::suggested("New Entry").on_press_maybe(
-                                        self.new_entry.is_none().then_some(Message::NewEntry),
-                                    )),
-                            );
-
-                            if entries.is_empty() {
-                                col = col.push(
-                                    widget::text::title1("No Entries")
-                                        .center()
-                                        .width(Length::Fill)
-                                        .height(Length::Fill),
-                                );
-                            } else {
-                                let mut list = widget::list_column();
-
-                                for entry in entries {
-                                    list = list.add(entry.view());
-                                }
-
-                                col = col.push(list);
-                            }
-                        }
-                    }
-                }
-            };
+            let logout =
+                button::icon(icon::from_name("system-log-out-symbolic")).on_press(Message::Logout);
+            let new_entry =
+                button::icon(icon::from_name("list-add-symbolic")).on_press(Message::NewEntry);
+            let system_bar = row().push(logout).push(horizontal_space()).push(new_entry);
+            content = content.push(system_bar);
+            let mut column = cosmic::widget::list_column();
+            for (idx, entry) in self.secret.as_array().iter().enumerate() {
+                column = column.add(entry.view().map(move |m| {
+                    Message::Entry(entry::EntryR::Index(idx.try_into().unwrap()), m)
+                }));
+            }
+            content = content.push(column);
         }
 
-        self.core
-            .applet
-            .popup_container(widget::container(widget::toaster(&self.toasts, col)))
-            .into()
+        self.core.applet.popup_container(content).into()
     }
 
     fn on_close_requested(&self, id: cosmic::iced::window::Id) -> Option<Self::Message> {
-        if let Some(popup_id) = self.popup {
-            if popup_id == id {
-                return Some(Message::Popup);
-            }
+        if let Some(popup_id) = self.popup
+            && popup_id == id
+        {
+            return Some(Message::TogglePopup);
         }
 
         None
     }
 
     fn subscription(&self) -> cosmic::iced::Subscription<Self::Message> {
-        cosmic::iced::time::every(cosmic::iced::time::Duration::from_secs(1))
-            .map(|_| Message::RecalcNeeded)
+        self.popup.map_or_else(Subscription::none, |p| {
+            Subscription::batch(
+                self.secret
+                    .as_array()
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, entry)| {
+                        entry
+                            .subscription(p)
+                            .with(entry::EntryR::Index(idx.try_into().unwrap()))
+                            .map(move |(r, m)| Message::Entry(r, m))
+                    }),
+            )
+        })
     }
 
-    fn update(&mut self, message: Self::Message) -> cosmic::app::Task<Self::Message> {
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "as the most important function in the application, it is expected to be complex"
+    )]
+    fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         match message {
-            Message::TogglePassphraseVisible => {
-                if let PassphraseState::Inputting { hidden, .. } = &mut self.passphrase {
-                    *hidden = !*hidden;
+            Message::TogglePopup => return self.toggle_popup(),
+            Message::RetrievedKey(state) => match state {
+                Ok(state) => {
+                    self.secret = state;
+                }
+                Err(e) => {
+                    error!("Failed to retrieve secret key: {e}");
+                }
+            },
+            Message::SetKey(r) => {
+                if let Err(e) = r {
+                    error!("Failed to set secret key: {e}");
                 }
             }
-            Message::RemoveError(id) => self.errors.retain(|e| e.id != id),
-            Message::PassphraseInput(s) => {
-                if let PassphraseState::Inputting { input, .. } = &mut self.passphrase {
-                    *input = s;
-                }
+            Message::UsernameInput(s) => self.user = Some(s),
+            Message::UsernameSubmit(s) => {
+                self.user = Some(s);
+                let task = self.update(Message::Save);
+                return Task::batch([task, self.get_secret_key()]);
             }
-            Message::PassphraseSubmitted => {
-                if let PassphraseState::Inputting { input, hidden } = &mut self.passphrase {
-                    let hidden = *hidden;
-                    let s = input.clone();
-                    self.passphrase = PassphraseState::Recieved(s.as_str().into());
-                    if let Err(e) = self.try_decode_secrets() {
-                        self.eat_err(e);
-                        self.passphrase = PassphraseState::Inputting { input: s, hidden }
-                    }
-                }
-            }
-            Message::NewEntry => self.new_entry = Some(NewEntry::default()),
-            Message::CancelNewEntry => self.new_entry = None,
-            Message::SaveNewEntry => {
-                if let Some(e) = self.new_entry.take() {
-                    match e.into_entry() {
-                        Ok(e) => {
-                            if let SecretState::LoadedSecrets { entries } = &mut self.secret_state {
-                                entries.push(e);
-                            }
-                        }
-                        Err((old_entry, error)) => {
-                            self.new_entry = Some(old_entry);
-                            self.eat_err(error);
-                        }
-                    }
-                }
-            }
-            Message::NewEntryName(n) => {
-                if let Some(e) = &mut self.new_entry {
-                    e.name = n;
-                }
-            }
-            Message::NewEntrySecret(s) => {
-                if let Some(e) = &mut self.new_entry {
-                    e.secret = s;
-                }
-            }
-            Message::NewEntryIcon(s) => {
-                if let Some(e) = &mut self.new_entry {
-                    e.icon = Some(TotpIcon::Initials { initials: s });
-                }
-            }
-            Message::IconFileFind => {
-                return cosmic::app::Task::perform(
-                    rfd::AsyncFileDialog::new()
-                        .add_filter("images", &["png"])
-                        .set_title("New Icon")
-                        .pick_file(),
-                    |f| cosmic::app::Message::App(Message::IconFileFound(f)),
-                );
-            }
-            Message::IconFileFound(file_handle) => {
-                if let Some(handle) = file_handle {
-                    if let Some(e) = &mut self.new_entry {
-                        e.icon = Some(TotpIcon::Image {
-                            path: PathBuf::from(handle.path()),
-                            handle: std::sync::OnceLock::new(),
-                        });
-                    }
-                }
-            }
-            Message::RecalcNeeded => {
-                if let SecretState::LoadedSecrets { entries } = &mut self.secret_state {
-                    let mut errs = Vec::new();
-                    for entry in entries {
-                        if let Err(err) = entry.decoded.update(&entry.secret) {
-                            errs.push(format!(
-                                "Failed to calculate auth code for {}: {err}",
-                                entry.name
-                            ));
-                        };
-                    }
-                    for err in errs {
-                        self.eat_err(err);
-                    }
-                }
-            }
-            Message::OpenDetails(uuid) => {
-                self.open_details = Some(uuid);
-            }
-            Message::CloseDetails => self.open_details = None,
-            Message::CopyCode(uuid) => {
-                if let SecretState::LoadedSecrets { entries } = &self.secret_state {
-                    if let Some(e) = entries.iter().find(|e| e.id == uuid) {
-                        if let Some(decoded) = e.decoded.decoded_raw() {
-                            return cosmic::app::Task::batch([
-                                cosmic::iced::clipboard::write(decoded.clone()),
-                                self.toasts
-                                    .push(widget::Toast::new(format!(
-                                        "Copied '{decoded}' to clipboard"
-                                    )))
-                                    .map(cosmic::app::Message::App),
-                            ]);
-                        }
-                    }
-                }
-            }
-            Message::RemoveToast(toast_id) => self.toasts.remove(toast_id),
-            Message::MaybeDelete(uuid) => self.potential_deletion = Some(uuid),
-            Message::CancelDeleteEntry => self.potential_deletion = None,
-            Message::DeleteEntry(uuid) => {
-                self.potential_deletion = None;
-                self.open_details = None;
-
-                if let SecretState::LoadedSecrets { entries } = &mut self.secret_state {
-                    entries.retain(|e| e.id != uuid);
-                }
-
-                if let Err(e) = self.try_save_secrets() {
-                    self.eat_err(e);
-                }
-            }
-            Message::Popup => return self.toggle_popup(),
-
             Message::Logout => {
-                let (secrets, errors) = get_secrets_data(&self.config);
-                for e in errors {
-                    self.errors.push(e);
+                self.secret = secrets::State::PendingUser;
+                self.user = None;
+                return self.update(Message::Save);
+            }
+            Message::Save => {
+                info!("Saving last used user '{:?}'", self.user);
+                if let Err(e) = self.config.set("last-user", self.user.clone()) {
+                    error!("Couldn't save last user: {e}");
                 }
-
-                self.secret_state = secrets;
-                self.passphrase = PassphraseState::Inputting {
-                    input: String::new(),
-                    hidden: true,
+                return self.set_secret_key();
+            }
+            Message::NewEntry => {
+                if self.new_entry.is_none() {
+                    self.new_entry = Some(entry::Entry::new());
+                }
+            }
+            Message::Entry(entry_r, message) => {
+                let entry = match entry_r {
+                    entry::EntryR::NewEntry => self.new_entry.as_mut(),
+                    entry::EntryR::Index(idx) => self.secret.as_mut_array().get_mut(idx as usize),
                 };
+                if let Some(entry_mut) = entry {
+                    match entry_mut.update(message) {
+                        Ok(m) => {
+                            self.entry_error = None;
+                            return m.map(move |m| cosmic::Action::App(Message::Entry(entry_r, m)));
+                        }
+                        Err(e) => {
+                            warn!("{e}");
+                            self.entry_error = Some(e);
+                        }
+                    }
+                } else {
+                    error!("Wanted to pass message to entry {entry_r:?}, but it did not exist");
+                }
+            }
+            Message::EntryClearError => self.entry_error = None,
+            Message::NewEntryCancel => self.new_entry = None,
+            Message::NewEntryAccept => {
+                if let Some(entry) = self.new_entry.take() {
+                    match self.secret.try_push(entry) {
+                        Ok(()) => {
+                            return self.update(Message::Save);
+                        }
+                        Err(e) => {
+                            self.new_entry = Some(e);
+                            error!("Failed to insert entry, not loaded yet?");
+                        }
+                    }
+                }
             }
         }
-
         cosmic::app::Task::none()
     }
 
-    fn dialog(&self) -> Option<cosmic::Element<Self::Message>> {
-        self.potential_deletion.and_then(|id| {
-            if let SecretState::LoadedSecrets { entries } = &self.secret_state {
-                if let Some(e) = entries.iter().find(|e| e.id == id) {
-                    return Some(e.view_remove_page());
-                }
-            }
-
-            None
-        })
-    }
+    // fn dialog(&self) -> Option<cosmic::Element<Self::Message>> {}
 
     fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
         Some(cosmic::applet::style())
@@ -377,26 +249,58 @@ impl cosmic::Application for App {
 
 impl App {
     pub fn toggle_popup(&mut self) -> cosmic::app::Task<Message> {
-        match self.popup.take() {
-            Some(id) => return cosmic::iced::platform_specific::shell::wayland::commands::popup::destroy_popup(id),
-            None => {
-                let id = cosmic::iced::window::Id::unique();
-                let mut settings = self.core.applet.get_popup_settings(
-                    self.core.main_window_id().unwrap(),
-                    id,
-                    None,
-                    None,
-                    None,
-                );
-                settings.positioner.size_limits = cosmic::iced::Limits::new(cosmic::iced::Size::new(200., 400.),
-                    cosmic::iced::Size::new(600., 800.),
-                );
-                settings.positioner.size = Some((300, 600));
-                self.popup = Some(id);
-                return cosmic::iced::platform_specific::shell::wayland::commands::popup::get_popup(
-                    settings,
-                );
-            },
+        info!("Toggling popup window");
+
+        if let Some(id) = self.popup.take() {
+            info!("Popup exists, removing");
+            return cosmic::iced::platform_specific::shell::wayland::commands::popup::destroy_popup(
+                id,
+            );
         }
+
+        info!("Popup doesn't exist, creating");
+        let id = cosmic::iced::window::Id::unique();
+        let mut settings = self.core.applet.get_popup_settings(
+            self.core.main_window_id().unwrap(),
+            id,
+            None,
+            None,
+            None,
+        );
+        settings.positioner.size_limits = cosmic::iced::Limits::new(
+            cosmic::iced::Size::new(200., 400.),
+            cosmic::iced::Size::new(600., 800.),
+        );
+        settings.positioner.size = Some((300, 600));
+        self.popup = Some(id);
+
+        let popup_task =
+            cosmic::iced::platform_specific::shell::wayland::commands::popup::get_popup(settings);
+        let secret_task = match &self.secret {
+            secrets::State::PendingUser => self.get_secret_key(),
+            secrets::State::Secrets(_) => Task::none(),
+        };
+
+        Task::batch([popup_task, secret_task])
+    }
+
+    pub fn get_secret_key(&self) -> Task<Message> {
+        self.user.clone().map_or_else(Task::none, |user| {
+            Task::perform(secrets::get_secret_key(user), |s| {
+                cosmic::Action::App(Message::RetrievedKey(s))
+            })
+        })
+    }
+    pub fn set_secret_key(&self) -> Task<Message> {
+        self.user
+            .clone()
+            .map_or_else(Task::none, |user| match &self.secret {
+                secrets::State::PendingUser => Task::none(),
+                secrets::State::Secrets(hash_map) => {
+                    Task::perform(secrets::set_secret_key(user, hash_map.clone()), |s| {
+                        cosmic::Action::App(Message::SetKey(s))
+                    })
+                }
+            })
     }
 }

@@ -1,72 +1,75 @@
-use cosmic::cosmic_config::ConfigSet;
+use tracing::{info, warn};
 
-use super::{App, entry::TotpEntry};
+use super::entry::Entry;
 
-pub enum PassphraseState {
-    Inputting { input: String, hidden: bool },
-    Recieved(age::secrecy::SecretString),
+#[derive(Debug, Clone)]
+pub enum State {
+    PendingUser,
+    Secrets(Vec<Entry>),
 }
-
-pub enum SecretState {
-    NoSecretsFile,
-    RequestingPassphrase { secret_data: Vec<u8> },
-    LoadedSecrets { entries: Vec<TotpEntry> },
-}
-
-impl App {
-    pub fn try_save_secrets(&mut self) -> Result<(), String> {
-        if let SecretState::LoadedSecrets { entries } = &self.secret_state {
-            let s = serde_json::to_string(entries)
-                .map_err(|e| format!("Could not serialize secrets: {e}"))?;
-
-            let PassphraseState::Recieved(pass) = &self.passphrase else {
-                return Err("Password has not been set, unable to encrypt secrets".into());
-            };
-
-            let s = match age::encrypt(&age::scrypt::Recipient::new(pass.clone()), s.as_bytes()) {
-                Ok(s) => s,
-                Err(e) => return Err(format!("Could not encrypt secrets: {e}")),
-            };
-
-            if let Err(e) = self.config.set("secrets", s) {
-                return Err(format!("Could not save secrest file: {e}"));
-            };
+impl State {
+    pub fn as_mut_array(&mut self) -> &mut [Entry] {
+        match self {
+            Self::PendingUser => &mut [],
+            Self::Secrets(items) => &mut *items,
         }
+    }
+    pub fn as_array(&self) -> &[Entry] {
+        match self {
+            Self::PendingUser => &[],
+            Self::Secrets(items) => items,
+        }
+    }
 
+    #[expect(clippy::result_large_err)]
+    pub fn try_push(&mut self, entry: Entry) -> Result<(), Entry> {
+        match self {
+            Self::PendingUser => Err(entry),
+            Self::Secrets(items) => {
+                items.push(entry);
+                Ok(())
+            }
+        }
+    }
+}
+
+pub async fn get_secret_key(username: String) -> Result<State, String> {
+    let data = tokio::task::spawn_blocking(move || {
+        info!("Requesting secrets");
+        let entry = keyring::Entry::new(crate::APP_ID, &username).map_err(|e| e.to_string())?;
+        Ok(match entry.get_secret() {
+            Ok(secr) => serde_json::from_slice(&secr)
+                .map_err(|e| format!("Couldn't deserialise secret store: {e}"))?,
+            Err(keyring::Error::NoEntry) => {
+                warn!("No entry in secret store, defaulting to empty");
+                Vec::new()
+            }
+            Err(e) => return Err(e.to_string()),
+        })
+    })
+    .await
+    .map_err(|e| format!("Couldn't join secret retrieving thread: {e}"))??;
+
+    info!("Retrieved secret key");
+    Ok(State::Secrets(data))
+}
+
+pub async fn set_secret_key(username: String, secret: Vec<Entry>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        info!("Setting secrets");
+        let entry = keyring::Entry::new(crate::APP_ID, &username).map_err(|e| e.to_string())?;
+        let ser = dbg!(serde_json::to_string(&secret))
+            .map_err(|e| format!("Failed to serialise secrets: {e}"))?;
+
+        match entry.set_secret(ser.as_bytes()) {
+            Ok(attrs) => attrs,
+            Err(e) => return Err(e.to_string()),
+        }
         Ok(())
-    }
+    })
+    .await
+    .map_err(|e| format!("Couldn't join secret retrieving thread: {e}"))??;
 
-    pub fn try_decode_secrets(&mut self) -> Result<(), String> {
-        match (&self.secret_state, &self.passphrase) {
-            (SecretState::NoSecretsFile, PassphraseState::Recieved(s)) => {
-                _ = s;
-                self.secret_state = SecretState::LoadedSecrets {
-                    entries: Vec::new(),
-                };
-                Ok(())
-            }
-            (SecretState::RequestingPassphrase { secret_data }, PassphraseState::Recieved(s)) => {
-                let secr = match age::decrypt(&age::scrypt::Identity::new(s.clone()), secret_data) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return Err(format!(
-                            "Could not decrypt secrets file - likey invalid passphrase: {e}"
-                        ));
-                    }
-                };
-
-                let secr = match serde_json::from_slice(&secr) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Err(format!("Could not deserialize from secrets file: {e}"));
-                    }
-                };
-
-                self.secret_state = SecretState::LoadedSecrets { entries: secr };
-
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    }
+    info!("Set secret key");
+    Ok(())
 }

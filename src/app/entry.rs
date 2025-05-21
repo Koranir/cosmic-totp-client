@@ -1,271 +1,423 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::OnceLock, time::Duration};
 
-use cosmic::{iced::Length, widget};
-
-use super::Message;
-
-#[derive(Default)]
-pub struct NewEntry {
-    pub icon: Option<TotpIcon>,
-    pub name: String,
-    pub secret: String,
-}
-impl NewEntry {
-    pub fn into_entry(self) -> Result<TotpEntry, (Self, String)> {
-        let mut secret = match totp_rs::Secret::Encoded(self.secret.clone()).to_bytes() {
-            Ok(s) => s,
-            Err(err) => {
-                return Err((self, format!("Failed to parse secret key: {err}")));
-            }
-        };
-        if secret.len() == 10 {
-            secret.extend_from_slice(&[0; 6]);
-        }
-        let mut decoded = CalcTotp::Uninit;
-        if let Err(err) = decoded.update(&secret) {
-            return Err((self, format!("Failed to calculate auth code: {err}")));
-        };
-        Ok(TotpEntry {
-            icon: self
-                .icon
-                .unwrap_or_else(|| TotpIcon::default_for_name(&self.name)),
-            name: self.name,
-            secret,
-            decoded,
-            id: uuid::Uuid::new_v4(),
-        })
-    }
-
-    pub fn view_dialog(&self) -> cosmic::Element<Message> {
-        widget::column()
-            .spacing(cosmic::theme::active().cosmic().space_s())
-            .push(widget::text::title3("New Entry"))
-            .push(
-                cosmic::widget::row()
-                    .align_y(cosmic::iced::Alignment::Center)
-                    .push(widget::text::heading("Icon").width(Length::Fixed(50.)))
-                    .push(
-                        cosmic::widget::text_input(
-                            if let Some(TotpIcon::Image { path, .. }) = &self.icon {
-                                path.to_string_lossy()
-                            } else {
-                                "-".into()
-                            },
-                            match &self.icon {
-                                Some(TotpIcon::Initials { initials }) => initials.as_str(),
-                                _ => "",
-                            },
-                        )
-                        .on_input(Message::NewEntryIcon),
-                    )
-                    .push(
-                        cosmic::widget::button::icon(
-                            cosmic::widget::icon::from_name("folder-open-symbolic").handle(),
-                        )
-                        .on_press(Message::IconFileFind),
-                    ),
-            )
-            .push(
-                cosmic::widget::row()
-                    .align_y(cosmic::iced::Alignment::Center)
-                    .push(widget::text::heading("Name").width(Length::Fixed(50.)))
-                    .push(
-                        cosmic::widget::text_input("name", &self.name)
-                            .on_input(Message::NewEntryName),
-                    ),
-            )
-            .push(
-                cosmic::widget::row()
-                    .align_y(cosmic::iced::Alignment::Center)
-                    .push(widget::text::heading("Secret").width(Length::Fixed(50.)))
-                    .push(
-                        cosmic::widget::text_input("XXXXXXXXXXXXXXXX", &self.secret)
-                            .on_input(Message::NewEntrySecret),
-                    ),
-            )
-            .push(
-                cosmic::widget::container(
-                    widget::row()
-                        .spacing(cosmic::theme::active().cosmic().space_xxs())
-                        .push(
-                            widget::button::destructive("Cancel").on_press(Message::CancelNewEntry),
-                        )
-                        .push(widget::button::suggested("Create").on_press(Message::SaveNewEntry)),
-                )
-                .align_right(Length::Fill),
-            )
-            .into()
-    }
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-pub struct TotpEntry {
-    pub id: uuid::Uuid,
-    pub icon: TotpIcon,
-    pub name: String,
-    pub secret: Vec<u8>,
-    #[serde(skip)]
-    pub decoded: CalcTotp,
-}
-impl TotpEntry {
-    pub fn view_remove_page(&self) -> cosmic::Element<Message> {
-        widget::container(
-            widget::column()
-                .push(widget::text::title1(format!("Delete '{}'?", self.name)))
-                .push(
-                    widget::row()
-                        .push(widget::horizontal_space())
-                        .push(
-                            widget::button::suggested("Cancel")
-                                .on_press(Message::CancelDeleteEntry),
-                        )
-                        .push(
-                            widget::button::destructive("Delete")
-                                .on_press(Message::DeleteEntry(self.id)),
-                        )
-                        .spacing(cosmic::theme::active().cosmic().space_xs()),
-                ),
-        )
-        .class(cosmic::theme::Container::Dialog)
-        .padding(cosmic::theme::active().cosmic().space_s())
-        .into()
-    }
-
-    pub fn view_page(&self) -> cosmic::Element<Message> {
-        let mut col = widget::column().spacing(cosmic::theme::active().cosmic().space_s());
-        col = col.push(
-            widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
-                .on_press(Message::CloseDetails),
-        );
-        col = col.push(
-            widget::row()
-                .spacing(cosmic::theme::active().cosmic().space_m())
-                .push(self.icon.view(40.))
-                .push(widget::text::title1(&self.name))
-                .push(widget::horizontal_space())
-                .push(widget::button::destructive("Delete").on_press(Message::MaybeDelete(self.id)))
-                .align_y(cosmic::iced::alignment::Vertical::Center),
-        );
-
-        col = col.push(widget::divider::horizontal::heavy());
-
-        let row = widget::container(
-            widget::column()
-                .spacing(cosmic::theme::active().cosmic().space_xs())
-                .push(widget::text::heading("One-time passcode"))
-                .push(
-                    widget::row()
-                        .align_y(cosmic::iced::alignment::Vertical::Center)
-                        .spacing(cosmic::theme::active().cosmic().space_s())
-                        .push(
-                            widget::button::text(self.decoded.decoded_pretty())
-                                .font_size(40)
-                                .font_weight(cosmic::iced::font::Weight::Bold)
-                                .on_press(Message::CopyCode(self.id)),
-                        )
-                        .push(widget::text::title3(
-                            self.decoded.seconds_remaining().to_string(),
-                        )),
-                ),
-        )
-        .padding(cosmic::theme::active().cosmic().space_s())
-        .width(Length::Fill)
-        .class(cosmic::style::Container::Card);
-
-        col = col.push(row);
-
-        col.into()
-    }
-
-    pub fn view(&self) -> cosmic::Element<Message> {
-        let mut row = widget::row()
-            .spacing(cosmic::theme::active().cosmic().space_s())
-            .align_y(cosmic::iced::alignment::Vertical::Center)
-            .push(self.icon.view(20.));
-        row = row.push(
-            widget::column()
-                .push(widget::text::title3(&self.name))
-                .push(
-                    widget::row()
-                        .push(widget::text::title1(self.decoded.decoded_pretty()))
-                        .push(widget::text::title3(
-                            self.decoded.seconds_remaining().to_string(),
-                        ))
-                        .align_y(cosmic::iced::alignment::Vertical::Center)
-                        .spacing(cosmic::theme::active().cosmic().space_xs()),
-                ),
-        );
-
-        row = row.push(widget::horizontal_space());
-        row = row.push(
-            widget::button::icon(widget::icon::from_name("go-next-symbolic"))
-                .large()
-                .on_press(Message::OpenDetails(self.id)),
-        );
-
-        widget::button::custom(row)
-            .class(cosmic::style::Button::ListItem)
-            .on_press(Message::CopyCode(self.id))
-            .into()
-    }
-}
-
-#[derive(Default)]
-pub enum CalcTotp {
-    #[default]
-    Uninit,
-    Calc {
-        decoded: String,
-        seconds_remaining: u64,
+use cosmic::{
+    Apply,
+    iced::{Alignment, Length, Subscription, font::Weight, futures::StreamExt, widget},
+    iced_widget::stack,
+    widget::{
+        button, canvas, column, container, row,
+        text::{self},
     },
+};
+use tokio::time::{Instant, interval_at};
+use tracing::info;
+
+#[derive(Debug, Clone, Copy, Hash)]
+pub enum EntryR {
+    NewEntry,
+    Index(u32),
 }
-impl CalcTotp {
-    pub fn update(&mut self, secret: &[u8]) -> Result<(), totp_rs::TotpUrlError> {
-        let totp = totp_rs::TOTP::new(totp_rs::Algorithm::SHA1, 6, 1, 30, secret.to_vec())?;
 
-        let unix_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let v = totp.generate(unix_time);
+#[derive(Debug, Clone)]
+pub enum EntryMessage {
+    GetIconFile,
+    SetIconFile(PathBuf),
+    NameEdit(String),
+    Algorithm(totp_rs::Algorithm),
+    Digits(usize),
+    Step(u64),
+    Skew(u8),
+    Secret(String),
+    CancelledIconFile,
+    Issuer(Option<String>),
+    Stepped(cosmic::iced::time::Instant, u64),
+    Animate(cosmic::iced::time::Instant),
+    Noop,
+    CopyOutput,
+}
 
-        *self = Self::Calc {
-            decoded: v,
-            seconds_remaining: 30 - unix_time % 30,
-        };
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct Entry {
+    pub icon: TotpIcon,
+    pub totp: totp_rs::TOTP,
+    pub secret: String,
+    #[serde(skip)]
+    pub output: String,
+    #[serde(skip)]
+    pub percentage: f32,
+    #[serde(skip, default = "std::time::Instant::now")]
+    pub last_output: std::time::Instant,
+    #[serde(skip, default = "std::time::Instant::now")]
+    pub current_output: std::time::Instant,
+}
+impl Entry {
+    pub fn new() -> Self {
+        Self {
+            icon: TotpIcon::Initials {
+                initials: "-".into(),
+            },
+            totp: totp_rs::TOTP {
+                algorithm: totp_rs::Algorithm::SHA1,
+                digits: 6,
+                skew: 1,
+                step: 30,
+                secret: Vec::new(),
+                account_name: String::new(),
+                issuer: None,
+            },
+            secret: String::new(),
+            output: String::new(),
+            percentage: 0.0,
+            last_output: std::time::Instant::now(),
+            current_output: std::time::Instant::now(),
+        }
+    }
+
+    pub fn update(&mut self, message: EntryMessage) -> Result<cosmic::Task<EntryMessage>, String> {
+        match message {
+            EntryMessage::GetIconFile => {
+                return Ok(cosmic::Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Entry Icon")
+                        .pick_file(),
+                    move |s| {
+                        s.map_or(EntryMessage::CancelledIconFile, |s| {
+                            EntryMessage::SetIconFile(s.path().to_path_buf())
+                        })
+                    },
+                ));
+            }
+            EntryMessage::SetIconFile(path_buf) => {
+                self.icon = TotpIcon::Image {
+                    path: path_buf,
+                    handle: OnceLock::new(),
+                };
+            }
+            EntryMessage::NameEdit(s) => {
+                self.totp.account_name = s;
+                self.recalc_icon();
+            }
+            EntryMessage::Algorithm(algorithm) => self.totp.algorithm = algorithm,
+            EntryMessage::Digits(s) => self.totp.digits = s,
+            EntryMessage::Step(s) => self.totp.step = s,
+            EntryMessage::Skew(s) => self.totp.skew = s,
+            EntryMessage::Secret(s) => {
+                self.secret = s;
+                // FIXME: Add this validation to all the necessary steps, and display it properly.
+                self.recalc_secret()?;
+            }
+            EntryMessage::CancelledIconFile => info!("User cancelled icon file set"),
+            EntryMessage::Issuer(s) => {
+                self.totp.issuer = s;
+                self.recalc_icon();
+            }
+            EntryMessage::Stepped(instant, time) => {
+                self.output = self.totp.generate(time);
+                self.last_output = instant;
+                self.percentage = 0.0;
+                self.current_output = instant;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            EntryMessage::Animate(instant) => {
+                self.current_output = instant;
+                self.percentage = self
+                    .current_output
+                    .duration_since(self.last_output)
+                    .as_secs_f32()
+                    / self.totp.step as f32;
+            }
+            EntryMessage::Noop => {}
+            EntryMessage::CopyOutput => {
+                return Ok(cosmic::iced::clipboard::write(self.output.clone()));
+            }
+        }
+
+        Ok(cosmic::Task::none())
+    }
+
+    pub fn recalc_icon(&mut self) {
+        if matches!(self.icon, TotpIcon::Initials { .. }) {
+            self.icon = TotpIcon::default_for_name(
+                self.totp
+                    .issuer
+                    .as_deref()
+                    .unwrap_or_else(|| &self.totp.account_name),
+            );
+        }
+    }
+
+    pub fn recalc_secret(&mut self) -> Result<(), String> {
+        let mut secret = self.secret.clone();
+        // Special case the microsoft authenticator 10-length secrets
+        if secret.len() == 10 {
+            secret.push_str("000000");
+        }
+        let raw = totp_rs::Secret::Encoded(secret)
+            .to_bytes()
+            .map_err(|e| format!("Invalid secret: {e}"))?;
+        self.totp.secret = raw;
 
         Ok(())
     }
 
-    pub fn decoded_pretty(&self) -> String {
-        match self {
-            Self::Uninit => "...".into(),
-            Self::Calc { decoded, .. } => {
-                let mut decoded = decoded.clone();
-                decoded.insert(3, ' ');
-                decoded
-            }
-        }
+    pub fn view_settings(&self, new: bool) -> cosmic::Element<EntryMessage> {
+        use cosmic::widget::{button, container, dropdown, settings, text, text_input};
+
+        let icon_setting = button::custom(self.icon.view(20.0).map(|s| match s {}))
+            .on_press(EntryMessage::GetIconFile);
+        // settings::item_row(Vec::new())
+        let home_row = settings::item_row(Vec::new())
+            .push(icon_setting)
+            .push(text_input("Name", &self.totp.account_name).on_input(EntryMessage::NameEdit));
+        let issuer = settings::item(
+            "Issuer",
+            text_input("None", self.totp.issuer.as_deref().unwrap_or_default())
+                .on_input(|s| EntryMessage::Issuer((!s.is_empty()).then_some(s))),
+        );
+        let secret = settings::item(
+            "Secret",
+            text_input("XXXXXXXX", &self.secret).on_input(EntryMessage::Secret),
+        );
+        let basic = settings::section().add(home_row).add(issuer).add(secret);
+        let algorithm = settings::item::item(
+            "Algorithm",
+            dropdown(
+                &["SHA1", "SHA256", "SHA512"],
+                match self.totp.algorithm {
+                    totp_rs::Algorithm::SHA1 => Some(0),
+                    totp_rs::Algorithm::SHA256 => Some(1),
+                    totp_rs::Algorithm::SHA512 => Some(2),
+                },
+                |s| {
+                    EntryMessage::Algorithm(match s {
+                        0 => totp_rs::Algorithm::SHA1,
+                        1 => totp_rs::Algorithm::SHA256,
+                        2 => totp_rs::Algorithm::SHA512,
+                        _ => unreachable!(),
+                    })
+                },
+            ),
+        );
+
+        let digits = settings::item(
+            "Digits",
+            cosmic::widget::spin_button(
+                self.totp.digits.to_string(),
+                self.totp.digits,
+                1,
+                0,
+                16,
+                EntryMessage::Digits,
+            ),
+        );
+        let skew = settings::item(
+            "Skew",
+            cosmic::widget::spin_button(
+                self.totp.skew.to_string(),
+                self.totp.skew,
+                1,
+                0,
+                16,
+                EntryMessage::Skew,
+            ),
+        );
+        let step = settings::item(
+            "Step",
+            cosmic::widget::spin_button(
+                self.totp.step.to_string(),
+                self.totp.step,
+                1,
+                0,
+                3600,
+                EntryMessage::Step,
+            ),
+        );
+        let advanced = settings::section()
+            .title("Advanced")
+            .add(algorithm)
+            .add(digits)
+            .add(skew)
+            .add(step);
+
+        let col = settings::view_column(Vec::new())
+            // .spacing(5)
+            .push(if new {
+                text::title1("New Entry")
+            } else {
+                text::title1("Edit Entry")
+            })
+            .push(basic)
+            .push(advanced);
+
+        container(col).into()
     }
 
-    pub fn decoded_raw(&self) -> Option<String> {
-        match self {
-            Self::Uninit => None,
-            Self::Calc { decoded, .. } => Some(decoded.clone()),
-        }
+    pub fn view(&self) -> cosmic::Element<EntryMessage> {
+        let name = row()
+            .push_maybe(self.totp.issuer.as_ref().map(|s| {
+                container(text::text(s))
+                    .padding([0.0, 5.0])
+                    .style(|t| container::Style {
+                        icon_color: None,
+                        text_color: Some(t.current_container().component.on.into()),
+                        background: Some(cosmic::iced::Background::Color(
+                            t.cosmic().primary_container_color().into(),
+                        )),
+                        border: cosmic::iced::Border {
+                            // color: t.cosmic().accent.base.into(),
+                            color: t.cosmic().small_widget_divider().into(),
+                            width: 1.0,
+                            radius: [4.0; 4].into(),
+                        },
+                        shadow: cosmic::iced::Shadow {
+                            color: cosmic::iced::Color::default(),
+                            offset: cosmic::iced::Vector::ZERO,
+                            blur_radius: 5.0,
+                        },
+                    })
+            }))
+            .push(text::text(&self.totp.account_name))
+            .spacing(4);
+        let content = column().push(name).push(
+            cosmic::widget::text(&self.output)
+                .class(cosmic::theme::Text::Accent)
+                .font(cosmic::font::mono().apply(|mut s| {
+                    s.weight = Weight::Bold;
+                    s
+                }))
+                .size(30),
+        );
+        let ttk: cosmic::Element<'static, ()> = canvas(Ttk {
+            percentage: 1.0 - self.percentage,
+            thickness: 4.0,
+        })
+        .width(30.0)
+        .height(30.0)
+        .into();
+        let ttk = stack([
+            ttk.map(|()| unreachable!()),
+            container(text::monotext(
+                (self
+                    .totp
+                    .step
+                    .checked_sub(
+                        self.current_output
+                            .duration_since(self.last_output)
+                            .as_secs(),
+                    )
+                    .unwrap_or_default())
+                .to_string(),
+            ))
+            .center(Length::Fill)
+            .into(),
+        ]);
+
+        button::custom(
+            row()
+                .push(self.icon.view(20.0).map(|m| match m {}))
+                .push(content)
+                .push(ttk)
+                .spacing(5)
+                .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .class(cosmic::theme::Button::ListItem)
+        .on_press(EntryMessage::CopyOutput)
+        .into()
     }
 
-    pub const fn seconds_remaining(&self) -> u64 {
-        match self {
-            Self::Uninit => 0,
-            Self::Calc {
-                seconds_remaining, ..
-            } => *seconds_remaining,
-        }
+    pub fn subscription(&self, window_id: cosmic::iced::window::Id) -> Subscription<EntryMessage> {
+        let curr_t = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        // let time_to = self.totp.next_step(curr_t.as_secs()) - curr_t.as_secs();
+        let next_time = Duration::new(
+            self.totp.step - curr_t.as_secs() % self.totp.step,
+            u32::MAX - curr_t.subsec_nanos(),
+        );
+        let time_since = Duration::from_secs(self.totp.step)
+            .checked_sub(next_time)
+            .unwrap_or_default();
+        let periodic = tokio_stream::once((
+            tokio::time::Instant::now().checked_sub(time_since).unwrap(),
+            curr_t.as_secs(),
+        ))
+        .chain(
+            tokio_stream::wrappers::IntervalStream::new(interval_at(
+                Instant::now() + next_time,
+                Duration::from_secs(self.totp.step),
+            ))
+            .map(|i| {
+                (
+                    i,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                )
+            }),
+        )
+        .map(|(i, t)| EntryMessage::Stepped(i.into(), t));
+        Subscription::batch([
+            Subscription::run_with_id(self.totp.step, periodic),
+            cosmic::iced::window::frames()
+                .with(window_id)
+                .map(|(wi, (i, t))| {
+                    if i == wi {
+                        EntryMessage::Animate(t)
+                    } else {
+                        EntryMessage::Noop
+                    }
+                }),
+        ])
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
+struct Ttk {
+    percentage: f32,
+    thickness: f32,
+}
+impl canvas::Program<(), cosmic::Theme> for Ttk {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &cosmic::Renderer,
+        theme: &cosmic::Theme,
+        bounds: cosmic::iced::Rectangle,
+        _cursor: cosmic::iced_core::mouse::Cursor,
+    ) -> Vec<canvas::Geometry<cosmic::Renderer>> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+
+        let line = canvas::Path::new(|b| {
+            b.ellipse(canvas::path::arc::Elliptical {
+                center: frame.center(),
+                radii: cosmic::iced::Vector::from(frame.size() - [self.thickness + 1.0; 2].into())
+                    * 0.5,
+                // radii: cosmic::iced::Vector::new(5.0, 5.0),
+                rotation: cosmic::iced::Radians(-std::f32::consts::PI / 2.0),
+                start_angle: cosmic::iced::Radians(0.0),
+                end_angle: cosmic::iced::Radians(-self.percentage * 2.0 * std::f32::consts::PI),
+            });
+        });
+
+        frame.stroke(
+            &line,
+            canvas::Stroke {
+                style: canvas::Style::Solid(theme.cosmic().accent_color().into()),
+                width: self.thickness,
+                line_cap: canvas::LineCap::Round,
+                line_join: canvas::LineJoin::Round,
+                line_dash: canvas::LineDash::default(),
+            },
+        );
+
+        vec![frame.into_geometry()]
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub enum TotpIcon {
     Image {
         path: PathBuf,
@@ -285,28 +437,28 @@ impl TotpIcon {
 
         if fch.len() < 2 {
             let cch = name.trim().chars().collect::<Vec<_>>();
-            let initials = cch
-                .get(0..2)
-                .map(|s| s.iter().copied().collect())
-                .unwrap_or(cch.first().copied().unwrap_or('-').to_string());
-            TotpIcon::Initials { initials }
+            let initials = cch.get(0..2).map_or_else(
+                || cch.first().copied().unwrap_or('-').to_string(),
+                |s| s.iter().copied().collect(),
+            );
+            Self::Initials { initials }
         } else {
-            TotpIcon::Initials {
+            Self::Initials {
                 initials: fch[0..2].iter().collect(),
             }
         }
     }
 
-    pub fn view(&self, radius: f32) -> cosmic::Element<Message> {
+    pub fn view(&self, radius: f32) -> cosmic::Element<std::convert::Infallible> {
         widget::container(match self {
             Self::Image { path, handle } => cosmic::Element::from(
                 widget::image(handle.get_or_init(|| widget::image::Handle::from_path(path)))
                     .width(Length::Fixed(radius * 2.0))
                     .height(Length::Fixed(radius * 2.0))
-                    .border_radius([radius, radius, radius, radius])
+                    .border_radius([radius; 4])
                     .content_fit(cosmic::iced::ContentFit::Cover),
             ),
-            Self::Initials { initials } => widget::text::title1(initials)
+            Self::Initials { initials } => cosmic::widget::text::title1(initials)
                 .width(radius * 2.0)
                 .height(radius * 2.0)
                 .center()
