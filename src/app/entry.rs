@@ -252,7 +252,7 @@ impl Entry {
         container(col).into()
     }
 
-    pub fn view(&self) -> cosmic::Element<EntryMessage> {
+    pub fn view<const SHOW_CODES: bool>(&self) -> cosmic::Element<EntryMessage> {
         let name = row()
             .push_maybe(self.totp.issuer.as_ref().map(|s| {
                 container(text::text(s))
@@ -278,52 +278,67 @@ impl Entry {
             }))
             .push(text::text(&self.totp.account_name))
             .spacing(4);
-        let content = column().push(name).push(
-            cosmic::widget::text(&self.output)
-                .class(cosmic::theme::Text::Accent)
-                .font(cosmic::font::mono().apply(|mut s| {
-                    s.weight = Weight::Bold;
-                    s
-                }))
-                .size(30),
-        );
-        let ttk: cosmic::Element<'static, ()> = canvas(Ttk {
-            percentage: 1.0 - self.percentage,
-            thickness: 4.0,
-        })
-        .width(30.0)
-        .height(30.0)
-        .into();
-        let ttk = stack([
-            ttk.map(|()| unreachable!()),
-            container(text::monotext(
-                (self
-                    .totp
-                    .step
-                    .checked_sub(
-                        self.current_output
-                            .duration_since(self.last_output)
-                            .as_secs(),
-                    )
-                    .unwrap_or_default())
-                .to_string(),
-            ))
-            .center(Length::Fill)
-            .into(),
-        ]);
+        let code = if SHOW_CODES {
+            Some(
+                cosmic::widget::text(&self.output)
+                    .class(cosmic::theme::Text::Accent)
+                    .font(cosmic::font::mono().apply(|mut s| {
+                        s.weight = Weight::Bold;
+                        s
+                    }))
+                    .size(30),
+            )
+        } else {
+            None
+        };
+        let content = column().push(name).push_maybe(code);
+        let ttk = if SHOW_CODES {
+            let ttk: cosmic::Element<'static, ()> = canvas(Ttk {
+                percentage: 1.0 - self.percentage,
+                thickness: 4.0,
+            })
+            .width(30.0)
+            .height(30.0)
+            .into();
+            let ttk = stack([
+                ttk.map(|()| unreachable!()),
+                container(text::monotext(
+                    (self
+                        .totp
+                        .step
+                        .checked_sub(
+                            self.current_output
+                                .duration_since(self.last_output)
+                                .as_secs(),
+                        )
+                        .unwrap_or_default())
+                    .to_string(),
+                ))
+                .center(Length::Fill)
+                .into(),
+            ]);
+            Some(ttk)
+        } else {
+            None
+        };
 
-        button::custom(
-            row()
-                .push(self.icon.view(20.0).map(|m| match m {}))
-                .push(content)
-                .push(ttk)
-                .spacing(5)
-                .align_y(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .class(cosmic::theme::Button::ListItem)
-        .on_press(EntryMessage::CopyOutput)
-        .into()
+        let content = row()
+            .push(self.icon.view(20.0).map(|m| match m {}))
+            .push(content)
+            .push_maybe(ttk)
+            .spacing(5)
+            .align_y(Alignment::Center);
+
+        if SHOW_CODES {
+            button::custom(content)
+                .width(Length::Shrink)
+                .class(cosmic::theme::Button::ListItem)
+                .padding(5)
+                .on_press(EntryMessage::CopyOutput)
+                .into()
+        } else {
+            content.into()
+        }
     }
 
     pub fn subscription(&self, window_id: cosmic::iced::window::Id) -> Subscription<EntryMessage> {

@@ -1,13 +1,18 @@
 use cosmic::{
     app::Task,
     cosmic_config::{ConfigGet, ConfigSet},
-    iced::Subscription,
+    iced::{Length, Subscription},
+    widget::container,
 };
 use tracing::{error, info, warn};
 
 mod entry;
 mod errors;
 mod secrets;
+
+pub struct Editing {
+    entry: Option<usize>,
+}
 
 pub struct App {
     core: cosmic::app::Core,
@@ -17,8 +22,11 @@ pub struct App {
     secret: secrets::State,
     new_entry: Option<entry::Entry>,
     entry_error: Option<String>,
+    editing_entry: Option<Editing>,
+    pending_delete: Option<usize>,
 
     user: Option<String>,
+    migrating: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +43,14 @@ pub enum Message {
     EntryClearError,
     NewEntryCancel,
     NewEntryAccept,
+    EditEntries,
+    MoveEntry { entry: usize, up: bool },
+    EditEntry(usize),
+    FinishEdit { only_current: bool },
+    DeleteEntry(usize),
+    ClearPendingDelete,
+    AcceptPendingDelete,
+    StartMigration,
 }
 
 impl cosmic::Application for App {
@@ -70,6 +86,9 @@ impl cosmic::Application for App {
                 user,
                 new_entry: None,
                 entry_error: None,
+                editing_entry: None,
+                pending_delete: None,
+                migrating: false,
             },
             cosmic::app::Task::none(),
         )
@@ -83,6 +102,7 @@ impl cosmic::Application for App {
             .into()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn view_window(&self, _id: cosmic::iced::window::Id) -> cosmic::Element<Self::Message> {
         use cosmic::widget::{button, column, horizontal_space, icon, row, text_input, warning};
 
@@ -112,23 +132,115 @@ impl cosmic::Application for App {
                         .as_deref()
                         .map(|s| warning(s).on_close(Message::EntryClearError)),
                 );
+        } else if let Some(editing) = &self.editing_entry {
+            let delete = if let Some(e) = editing.entry
+                && let Some(entry) = self.secret.as_array().get(e)
+            {
+                content =
+                    content.push(entry.view_settings(false).map(move |m| {
+                        Message::Entry(entry::EntryR::Index(e.try_into().unwrap()), m)
+                    }));
+
+                Some(button::destructive("Delete").on_press(Message::DeleteEntry(e)))
+            } else {
+                let mut column = cosmic::widget::column();
+                for (idx, entry) in self.secret.as_array().iter().enumerate() {
+                    let child = entry.view::<false>().map(move |m| {
+                        Message::Entry(entry::EntryR::Index(idx.try_into().unwrap()), m)
+                    });
+                    column = column.push(
+                        row()
+                            .push(child)
+                            .push(horizontal_space())
+                            .push(button::icon(icon::from_name("go-up-symbolic")).on_press(
+                                Message::MoveEntry {
+                                    entry: idx,
+                                    up: true,
+                                },
+                            ))
+                            .push(button::icon(icon::from_name("go-down-symbolic")).on_press(
+                                Message::MoveEntry {
+                                    entry: idx,
+                                    up: false,
+                                },
+                            ))
+                            .push(
+                                button::icon(icon::from_name("edit-symbolic"))
+                                    .class(cosmic::theme::Button::Standard)
+                                    .on_press(Message::EditEntry(idx)),
+                            ),
+                    );
+                }
+                content = content.push(column.spacing(5));
+
+                Some(button::standard("Migrate").on_press(Message::StartMigration))
+            };
+            content = content.push(row().push_maybe(delete).push(horizontal_space()).push(
+                button::suggested("Close").on_press(Message::FinishEdit {
+                    only_current: editing.entry.is_some(),
+                }),
+            ));
         } else {
-            let logout =
-                button::icon(icon::from_name("system-log-out-symbolic")).on_press(Message::Logout);
-            let new_entry =
-                button::icon(icon::from_name("list-add-symbolic")).on_press(Message::NewEntry);
-            let system_bar = row().push(logout).push(horizontal_space()).push(new_entry);
+            let logout = button::icon(icon::from_name("system-log-out-symbolic"))
+                .class(cosmic::theme::Button::Destructive)
+                .on_press(Message::Logout);
+            let edit_entries = button::icon(icon::from_name("edit-symbolic"))
+                .class(cosmic::theme::Button::Standard)
+                .on_press(Message::EditEntries);
+            let new_entry = button::icon(icon::from_name("list-add-symbolic"))
+                .class(cosmic::theme::Button::Suggested)
+                .on_press(Message::NewEntry);
+            let system_bar = container(
+                row()
+                    .push(logout)
+                    .push(self.user.as_deref().unwrap())
+                    .push_maybe((!self.secret.as_array().is_empty()).then_some(horizontal_space()))
+                    .push(edit_entries)
+                    .push(new_entry)
+                    .spacing(5)
+                    .align_y(cosmic::iced::Alignment::Center),
+            );
             content = content.push(system_bar);
-            let mut column = cosmic::widget::list_column();
+            let mut column = cosmic::widget::column();
             for (idx, entry) in self.secret.as_array().iter().enumerate() {
-                column = column.add(entry.view().map(move |m| {
+                column = column.push(entry.view::<true>().map(move |m| {
                     Message::Entry(entry::EntryR::Index(idx.try_into().unwrap()), m)
                 }));
             }
-            content = content.push(column);
+            content = content.push(column.spacing(5));
+            content = content.width(Length::Shrink);
         }
 
-        self.core.applet.popup_container(content).into()
+        let dialog = self.pending_delete.and_then(|idx| {
+            let entry = self.secret.as_array().get(idx)?;
+
+            let element = cosmic::widget::dialog()
+                .title("Delete Entry")
+                .body(format!(
+                    "Are you sure you want to delete {}{}",
+                    entry.totp.account_name,
+                    entry
+                        .totp
+                        .issuer
+                        .as_ref()
+                        .map_or_else(String::new, |issuer| format!(" ({issuer})"))
+                ))
+                .primary_action(
+                    cosmic::widget::button::suggested("Cancel")
+                        .on_press(Message::ClearPendingDelete),
+                )
+                .secondary_action(
+                    button::destructive("Delete").on_press(Message::AcceptPendingDelete),
+                );
+            Some(element)
+        });
+
+        let mut popover = cosmic::widget::popover(content).modal(true);
+        if let Some(dialog) = dialog {
+            popover = popover.popup(dialog);
+        }
+
+        self.core.applet.popup_container(popover).into()
     }
 
     fn on_close_requested(&self, id: cosmic::iced::window::Id) -> Option<Self::Message> {
@@ -160,6 +272,7 @@ impl cosmic::Application for App {
 
     #[allow(
         clippy::cognitive_complexity,
+        clippy::too_many_lines,
         reason = "as the most important function in the application, it is expected to be complex"
     )]
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
@@ -236,11 +349,41 @@ impl cosmic::Application for App {
                     }
                 }
             }
+            Message::EditEntries => {
+                self.editing_entry = Some(Editing { entry: None });
+            }
+            Message::MoveEntry { entry, up } => 'mv: {
+                if up && entry == 0 {
+                    break 'mv;
+                }
+                let next = if up { entry - 1 } else { entry + 1 };
+                let len = self.secret.as_array().len();
+                if (up && entry >= len) || (next >= len) {
+                    break 'mv;
+                }
+                self.secret.as_mut_array().swap(entry, next);
+                return self.update(Message::Save);
+            }
+            Message::EditEntry(e) => {
+                self.editing_entry = Some(Editing { entry: Some(e) });
+            }
+            Message::FinishEdit { only_current } => {
+                if only_current {
+                    self.editing_entry = Some(Editing { entry: None });
+                } else {
+                    self.editing_entry = None;
+                }
+                return self.update(Message::Save);
+            }
+            Message::DeleteEntry(e) => self.pending_delete = Some(e),
+            Message::ClearPendingDelete => self.pending_delete = None,
+            Message::AcceptPendingDelete => {
+                self.secret.delete(self.pending_delete.take().unwrap());
+            }
+            Message::StartMigration => self.migrating = true,
         }
         cosmic::app::Task::none()
     }
-
-    // fn dialog(&self) -> Option<cosmic::Element<Self::Message>> {}
 
     fn style(&self) -> Option<cosmic::iced_runtime::Appearance> {
         Some(cosmic::applet::style())

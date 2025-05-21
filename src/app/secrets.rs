@@ -21,6 +21,12 @@ impl State {
         }
     }
 
+    pub fn delete(&mut self, idx: usize) {
+        if let State::Secrets(items) = self {
+            items.remove(idx);
+        }
+    }
+
     #[expect(clippy::result_large_err)]
     pub fn try_push(&mut self, entry: Entry) -> Result<(), Entry> {
         match self {
@@ -58,7 +64,7 @@ pub async fn set_secret_key(username: String, secret: Vec<Entry>) -> Result<(), 
     tokio::task::spawn_blocking(move || {
         info!("Setting secrets");
         let entry = keyring::Entry::new(crate::APP_ID, &username).map_err(|e| e.to_string())?;
-        let ser = dbg!(serde_json::to_string(&secret))
+        let ser = serde_json::to_string(&secret)
             .map_err(|e| format!("Failed to serialise secrets: {e}"))?;
 
         match entry.set_secret(ser.as_bytes()) {
